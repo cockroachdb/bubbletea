@@ -63,7 +63,7 @@ type handlers []chan struct{}
 // generally set with ProgramOptions.
 //
 // The options here are treated as bits.
-type startupOptions byte
+type startupOptions int16
 
 func (s startupOptions) has(option startupOptions) bool {
 	return s&option != 0
@@ -77,12 +77,12 @@ const (
 	withCustomInput
 	withANSICompressor
 	withoutSignalHandler
-
 	// Catching panics is incredibly useful for restoring the terminal to a
 	// usable state after a panic occurs. When this is set, Bubble Tea will
 	// recover from panics, print the stack trace, and disable raw mode. This
 	// feature is on by default.
 	withoutCatchPanics
+	withoutBracketedPaste
 )
 
 // Program is a terminal user interface.
@@ -113,6 +113,8 @@ type Program struct {
 	// was the altscreen active before releasing the terminal?
 	altScreenWasActive bool
 	ignoreSignals      bool
+
+	bpWasActive bool // was the bracketed paste mode active before releasing the terminal?
 
 	// Stores the original reference to stdin for cases where input is not a
 	// TTY on windows and we've automatically opened CONIN$ to receive input.
@@ -296,6 +298,12 @@ func (p *Program) eventLoop(model Model, cmds chan Cmd) (Model, error) {
 			case hideCursorMsg:
 				p.renderer.hideCursor()
 
+			case enableBracketedPasteMsg:
+				p.renderer.enableBracketedPaste()
+
+			case disableBracketedPasteMsg:
+				p.renderer.disableBracketedPaste()
+
 			case execMsg:
 				// NB: this blocks.
 				p.exec(msg.cmd, msg.fn)
@@ -400,6 +408,9 @@ func (p *Program) Run() (Model, error) {
 	// Honor program startup options.
 	if p.startupOptions&withAltScreen != 0 {
 		p.renderer.enterAltScreen()
+	}
+	if p.startupOptions&withoutBracketedPaste == 0 {
+		p.renderer.enableBracketedPaste()
 	}
 	if p.startupOptions&withMouseCellMotion != 0 {
 		p.renderer.enableMouseCellMotion()
@@ -546,6 +557,7 @@ func (p *Program) ReleaseTerminal() error {
 	p.waitForReadLoop()
 
 	p.altScreenWasActive = p.renderer.altScreen()
+	p.bpWasActive = p.renderer.bracketedPasteActive()
 	return p.restoreTerminalState()
 }
 
@@ -561,12 +573,14 @@ func (p *Program) RestoreTerminal() error {
 	if err := p.initCancelReader(); err != nil {
 		return err
 	}
-
 	if p.altScreenWasActive {
 		p.renderer.enterAltScreen()
 	} else {
 		// entering alt screen already causes a repaint.
 		go p.Send(repaintMsg{})
+	}
+	if p.bpWasActive {
+		p.renderer.enableBracketedPaste()
 	}
 
 	// If the output is a terminal, it may have been resized while another
